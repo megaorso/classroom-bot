@@ -1,11 +1,3 @@
-#!/bin/bash
-set -e  # Detiene el script si ocurre un error
-
-echo "📦 Instalando dependencias..."
-pip install --upgrade pip
-pip install playwright
-
-echo "🌐 Instalando navegadores..."
-playwright install --with-deps
-
-echo "✅ Instalación completada con éxito."
+#!/usr/bin/env bash
+# Instala los navegadores de Playwright en Render (sin --with-deps)
+python -m playwright install

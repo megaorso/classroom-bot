@@ -1,1 +1,4 @@
 .env
+__pycache__/
+*.pyc
+*.json    # Solo si quieres ignorar tu JSON de credenciales

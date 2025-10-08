@@ -1,128 +1,125 @@
 import os
 import time
-import json
-import requests
-from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import openai
 from datetime import datetime
+from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+from telegram import Bot
+from openai import OpenAI
 
-# -----------------------------
-# CONFIGURACIÓN
-# -----------------------------
+# === CARGA DE VARIABLES DEL .ENV ===
 load_dotenv()
-
-EMAIL = os.getenv("GC_EMAIL")
-PASSWORD = os.getenv("GC_PASSWORD")
+GC_EMAIL = os.getenv("GC_EMAIL")
+GC_PASSWORD = os.getenv("GC_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-openai.api_key = OPENAI_KEY
-TAREAS_FILE = "tareas.json"
-STATE_FILE = "state.json"
+# === INICIALIZAR BOT DE TELEGRAM ===
+bot = Bot(token=TELEGRAM_TOKEN)
 
-# -----------------------------
-# FUNCIONES AUXILIARES
-# -----------------------------
+# === INICIALIZAR OPENAI ===
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-def send_telegram(message):
+# === FUNCIÓN PARA ENVIAR MENSAJES DE TELEGRAM ===
+def enviar_mensaje(mensaje: str):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje)
+        print(f"📩 Mensaje enviado a Telegram: {mensaje}")
     except Exception as e:
-        print(f"Error enviando Telegram: {e}")
+        print(f"⚠️ Error al enviar mensaje a Telegram: {e}")
 
-def cargar_tareas():
-    if os.path.exists(TAREAS_FILE):
-        with open(TAREAS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def guardar_tareas(tareas):
-    with open(TAREAS_FILE, "w") as f:
-        json.dump(tareas, f, indent=4)
-
-def resolver_tarea(descripcion):
-    prompt = f"Resuelve esta tarea de forma educativa y clara:\n{descripcion}\nRespuesta:"
+# === FUNCIÓN PARA GENERAR RESPUESTAS CON OPENAI ===
+def generar_respuesta(texto_tarea):
     try:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=prompt,
-            temperature=0.5,
-            max_tokens=250
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un asistente que ayuda a completar tareas de clase."},
+                {"role": "user", "content": texto_tarea}
+            ]
         )
-        return response.choices[0].text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"No se pudo generar solución: {e}"
+        return f"Error generando respuesta: {e}"
 
-# -----------------------------
-# FUNCIÓN PRINCIPAL
-# -----------------------------
-
+# === FUNCIÓN PRINCIPAL: REVISAR TAREAS PENDIENTES ===
 def revisar_tareas():
-    tareas_vistas = cargar_tareas()
-    nuevas_tareas = {}
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # Headless en servidor
-        if os.path.exists(STATE_FILE):
-            context = browser.new_context(storage_state=STATE_FILE)
+    print(f"🔁 Ejecutando revisión de tareas pendientes... {datetime.now()}")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
             page = context.new_page()
-            page.goto("https://classroom.google.com/u/0/h")
-            page.wait_for_load_state("networkidle", timeout=30000)
-            print("✅ Sesión cargada correctamente desde state.json")
-        else:
-            print("❌ No se encontró state.json. Ejecuta localmente una vez para guardar sesión.")
-            return
 
-        try:
+            # Ir a Google Classroom
+            print("🌐 Abriendo Google Classroom...")
+            page.goto("https://classroom.google.com/u/3/h", timeout=60000)
+
+            # Iniciar sesión si es necesario
+            if "accounts.google.com" in page.url:
+                print("🔐 Iniciando sesión...")
+                page.fill("input[type='email']", GC_EMAIL)
+                page.click("button:has-text('Siguiente')")
+                page.wait_for_timeout(2000)
+                page.fill("input[type='password']", GC_PASSWORD)
+                page.click("button:has-text('Siguiente')")
+                page.wait_for_load_state("networkidle")
+
+            # Esperar a que cargue el contenido principal
+            page.wait_for_selector("div[role='main']", timeout=60000)
+
+            # Buscar todas las tareas pendientes
             tareas = page.query_selector_all("a.onkcGd.ARTZne")
-            print(f"📋 Tareas encontradas: {len(tareas)}")
+            print(f"📋 {len(tareas)} tareas detectadas.")
 
-            for tarea in tareas:
-                try:
-                    titulo = tarea.inner_text().strip()
-                    descripcion = tarea.get_attribute("aria-label")
-                    if titulo not in tareas_vistas:
-                        solucion = resolver_tarea(descripcion)
-                        nuevas_tareas[titulo] = {
-                            "descripcion": descripcion,
-                            "solucion": solucion
-                        }
-                        print(f"✅ Nueva tarea procesada: {titulo}")
-                except Exception as e:
-                    print(f"No se pudo procesar una tarea: {e}")
-                    continue
+            if not tareas:
+                enviar_mensaje("🎉 No hay tareas pendientes.")
+            else:
+                for tarea in tareas:
+                    try:
+                        titulo = tarea.inner_text()
+                        href = tarea.get_attribute("href")
 
-        except PlaywrightTimeoutError:
-            print("⚠️ Timeout al cargar Classroom.")
-        except Exception as e:
-            print(f"Error general: {e}")
-        finally:
+                        if not href or not titulo.strip():
+                            continue
+
+                        print(f"📝 Procesando tarea: {titulo}")
+                        page.goto(f"https://classroom.google.com{href}", timeout=60000)
+                        page.wait_for_timeout(4000)
+
+                        # Obtener el texto de la tarea
+                        contenido = page.inner_text("div[role='main']")
+                        respuesta = generar_respuesta(contenido)
+
+                        # Crear un documento con la respuesta
+                        print("📄 Creando documento...")
+                        page.click("button:has-text('Agregar o crear')")
+                        page.wait_for_timeout(2000)
+                        page.click("div[role='menuitem']:has-text('Documentos')")
+                        page.wait_for_timeout(5000)
+
+                        # Cambiar al documento recién creado
+                        paginas = context.pages
+                        doc_page = paginas[-1]
+                        doc_page.wait_for_load_state("domcontentloaded")
+                        doc_page.keyboard.type(respuesta)
+                        time.sleep(2)
+
+                        enviar_mensaje(f"✅ Tarea '{titulo}' completada. Pendiente de entregar.")
+                        page.bring_to_front()
+                        page.wait_for_timeout(3000)
+                    except Exception as e:
+                        print(f"⚠️ Error con la tarea '{titulo if 'titulo' in locals() else 'desconocida'}': {e}")
+
             browser.close()
+    except Exception as e:
+        print(f"❌ Error general: {e}")
+        enviar_mensaje(f"❌ Error general en la revisión: {e}")
+    print("✅ Revisión completada.\n")
 
-    # Guardar nuevas tareas
-    tareas_vistas.update(nuevas_tareas)
-    guardar_tareas(tareas_vistas)
-
-    # Enviar notificación única
-    if nuevas_tareas:
-        mensaje = "✅ Revisión completada. Tareas nuevas resueltas:\n\n"
-        for t, info in nuevas_tareas.items():
-            mensaje += f"• {t}: {info['solucion']}\n\n"
-        send_telegram(mensaje)
-        print("📨 Notificación enviada a Telegram.")
-    else:
-        print("ℹ️ No se encontraron tareas nuevas hoy.")
-
-# -----------------------------
-# EJECUCIÓN AUTOMÁTICA 24/7
-# -----------------------------
-
+# === LOOP PRINCIPAL ===
 if __name__ == "__main__":
     while True:
-        print(f"🔁 Ejecutando revisión diaria... {datetime.now()}")
         revisar_tareas()
-        print("🕒 Esperando 24h para la próxima revisión...")
-        time.sleep(86400)  # Espera 24 horas (86400 segundos)
+        print("⏳ Esperando 1 hora para la siguiente revisión...\n")
+        time.sleep(3600)
